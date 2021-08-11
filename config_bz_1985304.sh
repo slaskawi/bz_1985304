@@ -1,4 +1,12 @@
 #!/bin/bash
+
+###
+## This is a slightly changed reproducer of <github>
+## for verifying https://bugzilla.redhat.com/show_bug.cgi?id=1985304
+##
+## The documentation: https://docs.openshift.com/container-platform/4.8/security/certificates/replacing-default-ingress-certificate.html
+###
+
 set -e
 
 PASSWORD=${PASSWORD:-password}
@@ -41,7 +49,7 @@ function create_server() {
         -passin "pass:${PASSWORD}"
 }
 
-function config_requestheader_idp() {
+function config_bz_1985304() {
     DOMAIN=$(oc get ingresscontroller.operator -n openshift-ingress-operator default -o template='{{ .status.domain }}')
     DOMAIN_WILDCARD="*.$DOMAIN"
     export SAN="DNS:$DOMAIN_WILDCARD"
@@ -49,24 +57,13 @@ function config_requestheader_idp() {
     create_server "$DOMAIN_WILDCARD"
     create_client
 
-    oc new-project login-proxy || true
-    oc adm policy add-cluster-role-to-user cluster-admin -z default -n login-proxy || true
+    oc delete configmap custom-ca -n openshift-config || true
+    oc delete secret custom-certs -n openshift-ingress || true
 
-    oc get cm -n openshift-config-managed default-ingress-cert -o template='{{ index .data "ca-bundle.crt"}}' > router-ca.crt
-    cat rootCA.crt router-ca.crt > ultimateca.crt
-
-    cat client.{crt,key} > client.pem
-
-    oc create cm request-header-ca --from-file="ca.crt=${DIR}/rootCA.crt" -n openshift-config
-    oc create secret generic crypto --from-file=server.crt --from-file=server.key --from-file=client.pem --from-file=ca.crt=ultimateca.crt
-
-    oc apply -f "${DIR}/apache_login_proxy.yaml"
-
-    OAUTH_ROUTE=$(oc get route -n openshift-authentication oauth-openshift -o template='{{ .spec.host }}')
-    PROXY_ROUTE=$(oc get route -n login-proxy login -o template='{{ .spec.host }}')
-    oc create cm routes --from-literal=oauth_route="$OAUTH_ROUTE" --from-literal=proxy_route="$PROXY_ROUTE"
-
-    oc apply -f - <<< $(cat requestheaderidp.yaml | sed -e "s#\${PROXY_ROUTE}#${PROXY_ROUTE}#g")
+    oc create configmap custom-ca --from-file=ca-bundle.crt=rootCA.crt -n openshift-config
+    oc patch proxy/cluster --type=merge --patch='{"spec":{"trustedCA":{"name":"custom-ca"}}}'
+    oc create secret tls custom-certs --cert=server.crt --key=server.key -n openshift-ingress
+    oc patch ingresscontroller.operator default --type=merge -p '{"spec":{"defaultCertificate": {"name": "custom-certs"}}}' -n openshift-ingress-operator
 }
 
-config_requestheader_idp
+config_bz_1985304
